@@ -6,22 +6,5 @@
 *.pem
 .DS_Store
 
-logs/
-config.json
 vendor/
-client/dist/
-!client/dist/webfiles.go
-client/node_modules/
-web/swagger/
 .vs/
-www/
-
-operations/spongedl/cache/
-operations/spongedl/mods/
-operations/spongedl/*.jar
-
-favicon.ico
-.dotnet/
-.wix/
-/pufferpanel.msi
-/pufferpanel.wixpdb

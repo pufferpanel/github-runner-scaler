@@ -1,0 +1,20 @@
+services:
+  redis:
+    image: redis:alpine
+    command:
+    - "--appendonly"
+    - "yes"
+    volumes:
+      - redis-data:/data
+
+  web:
+    build:
+      dockerfile: Dockerfile
+      context: .
+    env_file:
+      - path: ./.env
+      - path: ./override.env
+        required: false
+
+volumes:
+  redis-data:
