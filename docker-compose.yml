@@ -15,6 +15,10 @@ services:
       - path: ./.env
       - path: ./override.env
         required: false
+  tunnel:
+    image: cloudflare/cloudflared
+    command:
+      - "--no-autoupdate"
 
 volumes:
   redis-data:

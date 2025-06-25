@@ -9,7 +9,7 @@ import (
 const QueueName = "workflow_queue"
 const DeleteQueueName = "workflow_delete_queue"
 
-func init() {
+func StartWorkers() {
 	//kick off queue processor
 	go runWorker()
 
