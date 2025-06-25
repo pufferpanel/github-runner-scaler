@@ -6,6 +6,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,6 +17,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strings"
 )
 
 var Label = env.Get("github.label")
@@ -32,12 +34,13 @@ func main() {
 	r := gin.Default()
 
 	r.POST("/queue", func(c *gin.Context) {
-		var signature = []byte(c.GetHeader("X-Hub-Signature-256"))
-		if len(signature) == 0 {
+		var signature = c.GetHeader("X-Hub-Signature-256")
+		if signature == "" {
 			log.Printf("No signature")
 			c.Status(http.StatusUnauthorized)
 			return
 		}
+		signature = strings.TrimPrefix(signature, "sha256=")
 
 		original := io.LimitReader(c.Request.Body, 1024*1024)
 
@@ -58,7 +61,7 @@ func main() {
 			return
 		}
 
-		if subtle.ConstantTimeCompare(hash, signature) != 1 {
+		if subtle.ConstantTimeCompare(hash, []byte(signature)) != 1 {
 			log.Printf("Invalid signature (expected %s, got %s)", signature, hash)
 			c.Status(http.StatusUnauthorized)
 			return
@@ -122,5 +125,9 @@ func generateSha256(token []byte, payload []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return h.Sum(nil), nil
+	result := h.Sum(nil)
+
+	res := make([]byte, hex.EncodedLen(len(result)))
+	_ = hex.Encode(res, result)
+	return res, nil
 }

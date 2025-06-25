@@ -2,7 +2,6 @@ package main
 
 import (
 	"crypto/subtle"
-	"encoding/hex"
 	"reflect"
 	"testing"
 )
@@ -15,7 +14,7 @@ func Test_generateSha256(t *testing.T) {
 	tests := []struct {
 		name string
 		args args
-		want string
+		want []byte
 	}{
 		{
 			name: "Github Example",
@@ -23,7 +22,7 @@ func Test_generateSha256(t *testing.T) {
 				token:   []byte("It's a Secret to Everybody"),
 				payload: []byte("Hello, World!"),
 			},
-			want: "757107ea0eb2509fc211221cce984b8a37570b6d7586c22c46f4379c8b043e17",
+			want: []byte("757107ea0eb2509fc211221cce984b8a37570b6d7586c22c46f4379c8b043e17"),
 		},
 	}
 	for _, tt := range tests {
@@ -34,17 +33,11 @@ func Test_generateSha256(t *testing.T) {
 				return
 			}
 
-			expected, err := hex.DecodeString(tt.want)
-			if err != nil {
-				t.Errorf("hex.DecodeString() error = %v", err)
-				return
-			}
-
-			if !reflect.DeepEqual(got, expected) {
+			if !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("generateSha256() = \n%v\nwant\n%v", got, tt.want)
 			}
 
-			compare := subtle.ConstantTimeCompare(got, expected)
+			compare := subtle.ConstantTimeCompare(got, tt.want)
 			if compare != 1 {
 				t.Errorf("subtle.ConstantTimeCompare() = got: %v, want: %v", compare, 1)
 			}

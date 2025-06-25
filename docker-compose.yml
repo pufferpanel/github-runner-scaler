@@ -19,6 +19,9 @@ services:
     image: cloudflare/cloudflared
     command:
       - "--no-autoupdate"
+      - "tunnel"
+      - "--url"
+      - "http://web:8080"
 
 volumes:
   redis-data:
