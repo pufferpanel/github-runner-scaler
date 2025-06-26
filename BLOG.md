@@ -1,8 +1,15 @@
-# GitHub Runner Scaler
+# Blog
+
+This represents the mad descent into this project. Rather than cluttering the readme,
+this will serve as any "findings" I find during this endeavor. This is an append-only
+type of document, this way the history is preserved. The readme isn't.
+
+## Initial (2025-06-25)
+(copied from the readme at the initial creation)
 
 This is mainly a mad scientist project, but it's of value for us.
 
-Because ARC (GitHub's recommended tool for scalable self-hosted runners) 
+Because ARC (GitHub's recommended tool for scalable self-hosted runners)
 uses Kubernetes rather than VMs, this has a hard limitation when you want
 to start doing tasks that need an actual machine (or a VM). Docker-in-docker
 also isn't the greatest with this as well.
@@ -19,7 +26,7 @@ This is built up using the Proxmox API and using Proxmox as the host. When
 a workflow is queued up that has a specific runner group label, this will
 create a VM for that job and start it up. This works by cloning a VM which
 is mostly pre-configured with all the software provided by GitHub using their
-image repo. 
+image repo.
 
 The concept is that the VM is temporary. Once the job is done (which is another
 event from GitHub), we will remove the VM responsible. This means hopefully VMs
@@ -32,7 +39,7 @@ Flow:
 - API consumes the event, writes the id to a queue in Redis
 - Worker waits for an id to be posted to redis, pulls it
 - Worker creates a VM with a name with a specific prefix and the job id cloned
-from an existing VM template (ideally)
+  from an existing VM template (ideally)
 - Workflow starts the VM
 - GitHub sends a "workflow_job.completed" event when the job is completed
 - API consumes the event, writes the id to a different queue Redis
@@ -46,12 +53,13 @@ of the scripts and tasks in order for it to build within our ecosystem. However,
 this isn't too trivial, as mainly it relates to storage. This image isn't deployed
 publicly yet as the secret tokens haven't been removed from the script.
 
-# Resources
+## Getting the VMs set up with GitHub (2025-06-26)
 
-https://pve.proxmox.com/wiki/Proxmox_VE_API
+The next issues are getting the VM to register correctly with GitHub. Cloud-init
+does not make the correct data available to configure the instance, so unless we go
+and create an SSH connection to the VM, this is going to be difficult.
 
-https://pve.proxmox.com/pve-docs/api-viewer/
-
-https://docs.github.com/en/actions/hosting-your-own-runners/managing-self-hosted-runners/autoscaling-with-self-hosted-runners
-
-https://github.com/actions/runner-images
+In the worse case, we have to manually generate the cloud-init script and deploy it
+to Proxmox. This then can be attached to the new instance and used to load it. This
+however is ugly. If we assume a single instance, we could manage it, but this feels
+like a hack around this. But, we do what we must. On-ward mad science!
