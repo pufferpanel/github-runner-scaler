@@ -17,6 +17,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
 	"strings"
 )
 
@@ -29,6 +30,7 @@ var rdb = redis.NewClient(&redis.Options{
 })
 
 var GithubSecretToken = []byte(env.Get("github.secret"))
+var webLogger = log.New(os.Stdout, "[Web] ", log.LstdFlags|log.Lmicroseconds)
 
 func main() {
 	r := gin.Default()
@@ -36,7 +38,7 @@ func main() {
 	r.POST("/queue", func(c *gin.Context) {
 		var signature = c.GetHeader("X-Hub-Signature-256")
 		if signature == "" {
-			log.Printf("No signature")
+			webLogger.Printf("No signature")
 			c.Status(http.StatusUnauthorized)
 			return
 		}
@@ -48,7 +50,7 @@ func main() {
 		_, err := io.Copy(source, original)
 
 		if err != nil {
-			log.Printf("Error reading body: %s", err)
+			webLogger.Printf("Error reading body: %s", err)
 			c.Status(http.StatusInternalServerError)
 			return
 		}
@@ -56,13 +58,13 @@ func main() {
 		data := source.Bytes()
 		hash, err := generateSha256(GithubSecretToken, data)
 		if err != nil {
-			log.Printf("Error calclating hash: %s", err)
+			webLogger.Printf("Error calclating hash: %s", err)
 			c.Status(http.StatusInternalServerError)
 			return
 		}
 
 		if subtle.ConstantTimeCompare(hash, []byte(signature)) != 1 {
-			log.Printf("Invalid signature (expected %s, got %s)", signature, hash)
+			webLogger.Printf("Invalid signature (expected %s, got %s)", signature, hash)
 			c.Status(http.StatusUnauthorized)
 			return
 		}
@@ -106,7 +108,7 @@ func onWorkflowJob(request *github.WorkflowJobEvent) {
 
 	//this is a job we care about, let's start our queue stuff
 	//push it to redis, it will handle the queue
-	log.Printf("Adding %d to queue", *request.WorkflowJob.RunID)
+	webLogger.Printf("Adding %d to queue", *request.WorkflowJob.RunID)
 	rdb.RPush(context.Background(), queue, fmt.Sprintf("%d", *request.WorkflowJob.RunID))
 }
 

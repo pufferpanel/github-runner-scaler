@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"log"
+	"os"
 	"time"
 )
 
@@ -18,6 +19,7 @@ func StartWorkers() {
 }
 
 func runWorker() {
+	logger := log.New(os.Stdout, "[Runner] ", log.LstdFlags|log.Lmicroseconds)
 	var numVms int
 	var err error
 	for {
@@ -26,9 +28,9 @@ func runWorker() {
 		numVms, err = getNumVMs()
 		if numVms >= NumWorkers || err != nil {
 			if err != nil {
-				log.Printf("Failed to get number of running VMs: %s", err)
+				logger.Printf("Failed to get number of running VMs: %s", err)
 			} else {
-				log.Printf("Number of VMs exceeded (%d of %d), sleeping", numVms, NumWorkers)
+				logger.Printf("Number of VMs exceeded (%d of %d), sleeping", numVms, NumWorkers)
 			}
 			time.Sleep(time.Minute)
 			continue
@@ -36,30 +38,31 @@ func runWorker() {
 
 		cmd := rdb.BLPop(context.Background(), 0, QueueName)
 		if cmd.Err() != nil {
-			log.Printf("Error: %s", cmd.Err())
+			logger.Printf("Error: %s", cmd.Err())
 			continue
 		}
 
-		id := cmd.String()
-		log.Printf("Processing job: %s", id)
+		id := cmd.Val()[1]
+		logger.Printf("Processing job: %s", id)
 
 		//create VM
 		err = cloneVM(id)
 		if err != nil {
-			log.Fatalf("Failed to create vm: %s", err)
+			logger.Printf("Failed to create vm: %s", err)
 		}
 	}
 }
 
 func deleteWorker() {
+	logger := log.New(os.Stdout, "[Deleter] ", log.LstdFlags|log.Lmicroseconds)
 	for {
 		cmd := rdb.BLPop(context.Background(), 0, DeleteQueueName)
 		if cmd.Err() != nil {
-			log.Printf("Error: %s", cmd.Err())
+			logger.Printf("Error: %s", cmd.Err())
 			continue
 		}
 
 		id := cmd.String()
-		log.Printf("Processing delete job: %s", id)
+		logger.Printf("Processing delete job: %s", id)
 	}
 }
