@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -22,10 +23,20 @@ func runWorker() {
 	logger := log.New(os.Stdout, "[Runner] ", log.LstdFlags|log.Lmicroseconds)
 	var numVms int
 	var err error
+	var vms []VM
 	for {
 		//check how many VMs we have running, only permit a limit
 		//if the limit is reached, sleep and then check later
-		numVms, err = getNumVMs()
+		vms, err = getVMs()
+
+		numVms = 0
+		for _, v := range vms {
+			if strings.HasPrefix(v.Name, VmNamePrefix) {
+				numVms++
+			}
+		}
+		vms = nil
+
 		if numVms >= NumWorkers || err != nil {
 			if err != nil {
 				logger.Printf("Failed to get number of running VMs: %s", err)

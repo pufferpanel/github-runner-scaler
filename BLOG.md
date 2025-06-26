@@ -63,3 +63,54 @@ In the worse case, we have to manually generate the cloud-init script and deploy
 to Proxmox. This then can be attached to the new instance and used to load it. This
 however is ugly. If we assume a single instance, we could manage it, but this feels
 like a hack around this. But, we do what we must. On-ward mad science!
+
+Runners do support unattended installs, which is what we need here. The VM includes
+the runner by default, but it's a specific version. Based on their docs, we will have
+to regenerate the template VM every now than then to keep this up to date. This would
+avoid the (100) VMs updating the runner each time it runs. 
+
+In theory, cloud-init will let us send in the data using a meta, so we don't need to
+rebuild the actual init script, but just need to provide the new metadata. Cloud-init
+doesn't have the best documentation... This is a mess to figure out. But we will give
+this a try. 
+
+Further research has indicated this is just not possible directly without direct access
+to the Proxmox host.
+
+https://forum.proxmox.com/threads/creating-snippets-using-pve-api.54081/
+
+https://bugzilla.proxmox.com/show_bug.cgi?id=2208
+
+https://gist.github.com/aw/ce460c2100163c38734a83e09ac0439a
+
+We will have to manually SFTP the file into the server for using it. That's annoying...
+But, that's something we can manage to do at least.
+
+Steps are:
+- Clone VM
+- Add snippet to proxmox host
+- Update cicustom with snippet
+- Rebuild cloudinit image (?)
+- Start VM
+
+We still don't have the JIT token this actually needs solved yet, that's another step 
+down the line.
+
+------
+
+After more work, the tool is able to properly "configure" things, however it doesn't
+properly run CloudInit. This requires more research to see what's going on. While we
+set the user and ssh key, these don't appear to be copied over correctly.
+
+Oddly, our code isn't handling errors from the Proxmox API yet. We are getting a 400
+when setting config stuff. This turned out to be my check was > 400... opps.
+
+SSH Keys needs to be urlencoded for us to include it. This is more to help ensure that
+we can SSH into the server if we need to debug what's going on. This isn't required at 
+least.
+
+Turns out it's just use a different function. That's now fixed.
+
+But now, CloudInit doesn't appear to be running how we want. The VM isn't reconfiguring
+as we need it to in order to add our key + create GitHub runner. We'll need to look into
+what's going on more. The Proxmox calls at least work.

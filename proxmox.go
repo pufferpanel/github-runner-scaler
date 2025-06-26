@@ -3,14 +3,18 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"github.com/pkg/sftp"
 	"github.com/pufferpanel/github-runner-scaler/env"
+	"golang.org/x/crypto/ssh"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
-	"strings"
+	"path/filepath"
 	"time"
 )
 
@@ -21,6 +25,11 @@ var NumWorkers = env.GetIntOr("workers", 3)
 var TemplateVmId = env.GetInt("proxmox.templateId")
 var ProxmoxUrl = env.Get("proxmox.baseUrl")
 var ProxmoxNode = env.Get("proxmox.node")
+var ProxmoxSftpHost = env.Get("proxmox.sftp.host")
+var ProxmoxSftpUser = env.Get("proxmox.sftp.user")
+var ProxmoxSftpPassword = env.Get("proxmox.sftp.password")
+var CloudInitSshUser = env.Get("cloudinit.ssh.user")
+var CloudInitSshKey = env.Get("cloudinit.ssh.key")
 
 var CloneVmUrl *url.URL
 var GetVmsUrl *url.URL
@@ -40,44 +49,30 @@ func init() {
 	}
 }
 
-func cloneVM(id string) error {
-	currentId, err := getHighestId()
+func cloneVM(githubRunId string) error {
+	vms, err := getVMs()
 	if err != nil {
 		return err
+	}
+
+	var currentId int
+	for _, vm := range vms {
+		if currentId < vm.Id {
+			currentId = vm.Id
+		}
 	}
 	currentId++
 
 	b := new(bytes.Buffer)
 	err = json.NewEncoder(b).Encode(&CloneRequest{
 		NewId: currentId,
-		Name:  VmNamePrefix + id,
+		Name:  VmNamePrefix + githubRunId,
 	})
 	if err != nil {
 		return err
 	}
 
-	response, err := doRequest(http.MethodPost, CloneVmUrl, b.Bytes())
-	defer closeResponse(response)
-
-	var body []byte
-	if response != nil {
-		body, _ = io.ReadAll(response.Body)
-		proxmoxLogger.Printf("Response: %s", body)
-	}
-
-	if err != nil {
-		return err
-	}
-
-	//get back id
-	d := StringDataResponse{}
-	err = json.NewDecoder(bytes.NewReader(body)).Decode(&d)
-	if err != nil {
-		proxmoxLogger.Printf("Json decode failed: %s", err)
-		return err
-	}
-
-	taskId := d.Data
+	taskId, err := doRequest[string](http.MethodPost, CloneVmUrl, b.Bytes())
 
 	//wait for task to complete
 	var done bool
@@ -89,50 +84,67 @@ func cloneVM(id string) error {
 		}
 	}
 
+	var snippet = fmt.Sprintf("snippets/%d.json", currentId)
+	//drop in the new snippet
+	err = writeMetaCloudInit(snippet, map[string]string{})
+	if err != nil {
+		proxmoxLogger.Printf("Error creating snippet: %s", err)
+		return err
+	}
+
+	//update the config to include our snippet
+	err = updateCloudInit(currentId, snippet)
+	if err != nil {
+		proxmoxLogger.Printf("Error updating cicustom: %s", err)
+		return err
+	}
+
+	//just in case, rebuild the cloud init image
+	//do this in a function so things are closed here
+	err = regenerateCloudInitImage(currentId)
+	if err != nil {
+		proxmoxLogger.Printf("Error rebuilding cloudinit: %s", err)
+		return err
+	}
+
 	//start the VM
 	err = startVM(currentId)
 	return err
 }
 
-func getNumVMs() (int, error) {
-	vms, err := getVMs()
-	if err != nil {
-		return 0, err
-	}
-	var count = 0
-	for _, v := range vms {
-		if strings.HasPrefix(v.Name, VmNamePrefix) {
-			count++
-		}
-	}
-
-	return count, nil
-}
-
-func getHighestId() (int, error) {
-	vms, err := getVMs()
-	if err != nil {
-		return 0, err
-	}
-	id := 100
-	for _, v := range vms {
-		if id < v.Id {
-			id = v.Id
-		}
-	}
-	return id, nil
-}
-
 func getVMs() ([]VM, error) {
-	response, err := doRequest(http.MethodGet, GetVmsUrl, nil)
-	defer closeResponse(response)
+	return doRequest[[]VM](http.MethodGet, GetVmsUrl, nil)
+}
+
+func updateCloudInit(id int, path string) error {
+	u, err := url.Parse(fmt.Sprintf("%s/api2/json/nodes/%s/qemu/%d/config", ProxmoxUrl, ProxmoxNode, id))
 	if err != nil {
-		return nil, err
+		return err
 	}
 
-	data := ListVmsResponse{}
-	err = json.NewDecoder(response.Body).Decode(&data)
-	return data.Data, err
+	newConfig := &VM{
+		CloudInitCustom: fmt.Sprintf("meta=local:%s,user=local:snippets/github-runner.yaml", path),
+		CloudInitUser:   CloudInitSshUser,
+		SshKeys:         url.PathEscape(CloudInitSshKey),
+	}
+
+	buf := new(bytes.Buffer)
+	err = json.NewEncoder(buf).Encode(&newConfig)
+	if err != nil {
+		return err
+	}
+
+	_, err = doRequest[None](http.MethodPut, u, buf.Bytes())
+	return err
+}
+
+func regenerateCloudInitImage(id int) error {
+	u, err := url.Parse(fmt.Sprintf("%s/api2/json/nodes/%s/qemu/%d/cloudinit", ProxmoxUrl, ProxmoxNode, id))
+	if err != nil {
+		return err
+	}
+	_, err = doRequest[None](http.MethodPut, u, nil)
+	return err
 }
 
 func isTaskComplete(id string) (bool, error) {
@@ -141,21 +153,13 @@ func isTaskComplete(id string) (bool, error) {
 		return false, err
 	}
 
-	response, err := doRequest(http.MethodGet, u, nil)
-	defer closeResponse(response)
+	response, err := doRequest[TaskStatus](http.MethodGet, u, nil)
 	if err != nil {
 		return false, err
 	}
-
-	var taskStatus TaskStatusResponse
-	err = json.NewDecoder(response.Body).Decode(&taskStatus)
-	if err != nil {
-		return false, err
-	}
-
-	if taskStatus.Data.Status == "stopped" {
-		if taskStatus.Data.ExitStatus != "OK" {
-			return true, fmt.Errorf("task %s failed (%s)", id, taskStatus.Data.ExitStatus)
+	if response.Status == "stopped" {
+		if response.ExitStatus != "OK" {
+			return true, fmt.Errorf("task %s failed (%s)", id, response.ExitStatus)
 		}
 		return true, err
 	}
@@ -169,8 +173,51 @@ func startVM(id int) error {
 		return err
 	}
 
-	response, err := doRequest(http.MethodPost, u, nil)
-	defer closeResponse(response)
+	_, err = doRequest[string](http.MethodPost, u, nil)
+	return err
+}
+
+func writeMetaCloudInit(filename string, data map[string]string) error {
+	msg := map[string]map[string]string{
+		"v1": data,
+	}
+
+	sshConn, err := ssh.Dial("tcp", ProxmoxSftpHost, &ssh.ClientConfig{
+		Config: ssh.Config{},
+		User:   ProxmoxSftpUser,
+		Auth:   []ssh.AuthMethod{ssh.Password(ProxmoxSftpPassword)},
+		HostKeyCallback: func(hostname string, remote net.Addr, key ssh.PublicKey) error {
+			return nil
+		},
+	})
+	defer func() {
+		if sshConn != nil {
+			_ = sshConn.Close()
+		}
+	}()
+	if err != nil {
+		return err
+	}
+
+	sftpConn, err := sftp.NewClient(sshConn)
+	defer func() {
+		if sftpConn != nil {
+			_ = sftpConn.Close()
+		}
+	}()
+	if err != nil {
+		return err
+	}
+	file, err := sftpConn.Create(filepath.Join("/var/lib/vz/", filename))
+	defer func() {
+		if file != nil {
+			_ = file.Close()
+		}
+	}()
+	if err != nil {
+		return err
+	}
+	err = json.NewEncoder(file).Encode(&msg)
 	return err
 }
 
@@ -180,14 +227,14 @@ func closeResponse(response *http.Response) {
 	}
 }
 
-func doRequest(method string, url *url.URL, body []byte) (*http.Response, error) {
+func doRequest[T ProxmoxResponse](method string, url *url.URL, body []byte) (T, error) {
 	request := &http.Request{
 		Method: method,
 		URL:    url,
 		Header: make(http.Header),
 	}
 
-	if method == http.MethodPost && body == nil {
+	if (method == http.MethodPost || method == http.MethodPut) && body == nil {
 		body = []byte("{}") //proxmox wants a junk json object for POSTs
 	}
 
@@ -200,44 +247,53 @@ func doRequest(method string, url *url.URL, body []byte) (*http.Response, error)
 	request.Header.Set("Authorization", fmt.Sprintf("PVEAPIToken=%s=%s", env.Get("proxmox.user"), env.Get("proxmox.password")))
 
 	response, err := httpClient.Do(request)
-	if err != nil || response.StatusCode > 400 {
+	defer closeResponse(response)
+	if err != nil || response.StatusCode >= 400 {
 		var data []byte
 		if err != nil {
+			proxmoxLogger.Printf("Error from call: %s", err.Error())
 			data = []byte(err.Error())
 		} else {
 			data, _ = io.ReadAll(response.Body)
 			_ = response.Body.Close()
 			response.Body = io.NopCloser(bytes.NewReader(data)) //replace body in case a downstream reader wants it
+			err = errors.New(string(data))
 		}
-		proxmoxLogger.Printf("%s: %s (%d)\n%s", request.Method, request.URL.String(), response.StatusCode, data)
+		proxmoxLogger.Printf("%s: %s (%d) %s", request.Method, request.URL.String(), response.StatusCode, string(data))
+		return *new(T), err
 	} else {
 		proxmoxLogger.Printf("%s: %s (%d)", request.Method, request.URL.String(), response.StatusCode)
 	}
-	return response, err
+
+	type resType struct {
+		Data T `json:"data"`
+	}
+
+	res := &resType{}
+	err = json.NewDecoder(response.Body).Decode(res)
+	return res.Data, err
 }
+
+type ProxmoxResponse interface {
+	None | TaskStatus | string | VM | []VM
+}
+
+type None interface{}
 
 type CloneRequest struct {
 	NewId int    `json:"newid"`
 	Name  string `json:"name"`
 }
 
-type TaskStatusResponse struct {
-	Data TaskStatus `json:"data"`
-}
 type TaskStatus struct {
 	Status     string `json:"status"`
 	ExitStatus string `json:"exitstatus"`
 }
 
 type VM struct {
-	Id   int    `json:"vmid"`
-	Name string `json:"name"`
-}
-
-type ListVmsResponse struct {
-	Data []VM `json:"data"`
-}
-
-type StringDataResponse struct {
-	Data string `json:"data"`
+	Id              int    `json:"vmid,omitempty"`
+	Name            string `json:"name,omitempty"`
+	CloudInitCustom string `json:"cicustom,omitempty"`
+	CloudInitUser   string `json:"ciuser,omitempty"`
+	SshKeys         string `json:"sshkeys,omitempty"`
 }
