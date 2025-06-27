@@ -1,24 +1,16 @@
 package main
 
 import (
-	"bytes"
 	"context"
-	"crypto/hmac"
-	"crypto/sha256"
-	"crypto/subtle"
-	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"github.com/gin-gonic/gin"
 	"github.com/google/go-github/v73/github"
 	"github.com/pufferpanel/github-runner-scaler/env"
 	"github.com/redis/go-redis/v9"
-	"io"
 	"log"
 	"net/http"
 	"os"
-	"strings"
 )
 
 var Label = env.Get("github.label")
@@ -36,46 +28,22 @@ func main() {
 	r := gin.Default()
 
 	r.POST("/queue", func(c *gin.Context) {
-		var signature = c.GetHeader("X-Hub-Signature-256")
-		if signature == "" {
-			webLogger.Printf("No signature")
-			c.Status(http.StatusUnauthorized)
-			return
-		}
-		signature = strings.TrimPrefix(signature, "sha256=")
-
-		original := io.LimitReader(c.Request.Body, 1024*1024)
-
-		source := new(bytes.Buffer)
-		_, err := io.Copy(source, original)
-
+		payload, err := github.ValidatePayload(c.Request, GithubSecretToken)
 		if err != nil {
-			webLogger.Printf("Error reading body: %s", err)
-			c.Status(http.StatusInternalServerError)
+			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
 
-		data := source.Bytes()
-		hash, err := generateSha256(GithubSecretToken, data)
+		event, err := github.ParseWebHook(github.WebHookType(c.Request), payload)
 		if err != nil {
-			webLogger.Printf("Error calclating hash: %s", err)
-			c.Status(http.StatusInternalServerError)
+			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
+		}
+		switch event := event.(type) {
+		case *github.WorkflowJobEvent:
+			onWorkflowJob(event)
 		}
 
-		if subtle.ConstantTimeCompare(hash, []byte(signature)) != 1 {
-			webLogger.Printf("Invalid signature (expected %s, got %s)", signature, hash)
-			c.Status(http.StatusUnauthorized)
-			return
-		}
-
-		request := &github.WorkflowJobEvent{}
-		err = json.NewDecoder(bytes.NewReader(data)).Decode(request)
-		if err != nil {
-			c.AbortWithStatus(http.StatusBadRequest)
-			return
-		}
-		onWorkflowJob(request)
 		c.Status(http.StatusAccepted)
 	})
 
@@ -119,17 +87,4 @@ func contains(s []string, e string) bool {
 		}
 	}
 	return false
-}
-
-func generateSha256(token []byte, payload []byte) ([]byte, error) {
-	h := hmac.New(sha256.New, token)
-	_, err := h.Write(payload)
-	if err != nil {
-		return nil, err
-	}
-	result := h.Sum(nil)
-
-	res := make([]byte, hex.EncodedLen(len(result)))
-	_ = hex.Encode(res, result)
-	return res, nil
 }

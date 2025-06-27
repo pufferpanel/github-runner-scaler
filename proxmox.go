@@ -28,8 +28,6 @@ var ProxmoxNode = env.Get("proxmox.node")
 var ProxmoxSftpHost = env.Get("proxmox.sftp.host")
 var ProxmoxSftpUser = env.Get("proxmox.sftp.user")
 var ProxmoxSftpPassword = env.Get("proxmox.sftp.password")
-var CloudInitSshUser = env.Get("cloudinit.ssh.user")
-var CloudInitSshKey = env.Get("cloudinit.ssh.key")
 
 var CloneVmUrl *url.URL
 var GetVmsUrl *url.URL
@@ -84,31 +82,34 @@ func cloneVM(githubRunId string) error {
 		}
 	}
 
-	var snippet = fmt.Sprintf("snippets/%d.json", currentId)
+	//var snippet = fmt.Sprintf("snippets/%d.json", currentId)
 	//drop in the new snippet
-	err = writeMetaCloudInit(snippet, map[string]string{})
-	if err != nil {
-		proxmoxLogger.Printf("Error creating snippet: %s", err)
-		return err
-	}
+	//err = writeMetaCloudInit(snippet, map[string]string{})
+	//if err != nil {
+	//	proxmoxLogger.Printf("Error creating snippet: %s", err)
+	//	return err
+	//}
 
 	//update the config to include our snippet
-	err = updateCloudInit(currentId, snippet)
-	if err != nil {
-		proxmoxLogger.Printf("Error updating cicustom: %s", err)
-		return err
-	}
+	//err = updateCloudInit(currentId, snippet)
+	//if err != nil {
+	//	proxmoxLogger.Printf("Error updating cicustom: %s", err)
+	//	return err
+	//}
 
 	//just in case, rebuild the cloud init image
 	//do this in a function so things are closed here
-	err = regenerateCloudInitImage(currentId)
-	if err != nil {
-		proxmoxLogger.Printf("Error rebuilding cloudinit: %s", err)
-		return err
-	}
+	//err = regenerateCloudInitImage(currentId)
+	//if err != nil {
+	//	proxmoxLogger.Printf("Error rebuilding cloudinit: %s", err)
+	//	return err
+	//}
 
 	//start the VM
 	err = startVM(currentId)
+
+	go observeVM(currentId)
+
 	return err
 }
 
@@ -123,9 +124,9 @@ func updateCloudInit(id int, path string) error {
 	}
 
 	newConfig := &VM{
-		CloudInitCustom: fmt.Sprintf("meta=local:%s,user=local:snippets/github-runner.yaml", path),
-		CloudInitUser:   CloudInitSshUser,
-		SshKeys:         url.PathEscape(CloudInitSshKey),
+		CloudInitCustom: fmt.Sprintf("user=local:snippets/github-runner.yaml"),
+		//CloudInitUser:   CloudInitSshUser,
+		//SshKeys:         url.PathEscape(CloudInitSshKey),
 	}
 
 	buf := new(bytes.Buffer)
@@ -178,10 +179,6 @@ func startVM(id int) error {
 }
 
 func writeMetaCloudInit(filename string, data map[string]string) error {
-	msg := map[string]map[string]string{
-		"v1": data,
-	}
-
 	sshConn, err := ssh.Dial("tcp", ProxmoxSftpHost, &ssh.ClientConfig{
 		Config: ssh.Config{},
 		User:   ProxmoxSftpUser,
@@ -217,7 +214,7 @@ func writeMetaCloudInit(filename string, data map[string]string) error {
 	if err != nil {
 		return err
 	}
-	err = json.NewEncoder(file).Encode(&msg)
+	err = json.NewEncoder(file).Encode(&data)
 	return err
 }
 
@@ -272,6 +269,10 @@ func doRequest[T ProxmoxResponse](method string, url *url.URL, body []byte) (T, 
 	res := &resType{}
 	err = json.NewDecoder(response.Body).Decode(res)
 	return res.Data, err
+}
+
+func observeVM(id int) {
+	//
 }
 
 type ProxmoxResponse interface {

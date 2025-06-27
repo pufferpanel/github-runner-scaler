@@ -114,3 +114,44 @@ Turns out it's just use a different function. That's now fixed.
 But now, CloudInit doesn't appear to be running how we want. The VM isn't reconfiguring
 as we need it to in order to add our key + create GitHub runner. We'll need to look into
 what's going on more. The Proxmox calls at least work.
+
+## Integrating to get JIT tokens
+
+The next challenge for now is to just work out how to generate the tokens we need to 
+create our own runners on demand. The tokens only last for an hour, but it probably
+will be easier to just constantly request them.
+
+Also learned the Google library for GitHub includes the stuff we need for the web server,
+so I do not need to manually validate SHA256 or all of that. We should use this instead.
+
+We will use the JIT config, which should just auto-drop into the runner configs and run
+directly, so we don't need to call the crazy scripts as much. But we have to see.
+
+Further research has shown that the JIT is only used when you call run.sh for a runner.
+This isn't such a big deal, except not 100% sure how we'd be able to actually execute 
+this well.
+
+We could potentially just SSH into the server and execute it. This would give the "manager"
+access to pull the logs as it'd have them directly. However, getting the IP for the VM
+would be tricky. Because qemu-guest-agent is in theory installed, we should be able to
+pull it from there.
+
+This may end up also being a case for vendor-data to be used instead. 
+
+The easier option at this stage is using SSH to do the configurations.
+We will update the cloud-init to just generate our user and place the key. Then, use SSH
+to remove in and set up and run the runner. We will use the SFTP client to drop our config
+into place from the GitHub API and pass that to the runner. We'll log all of this so we can
+accurately see what is going on.
+The SSH connection will have to plan for a possible reboot when cloudinit does it. But, 
+once we can actually SSH in, we should be configured correctly. We'll basically need a
+timeout system where we need to SSH in within 5 minutes. If we do, we're fine. If we don't,
+the VM should be considered trash.
+
+https://dragonpit.rift.haus:8006/api2/json/nodes/dragonpit/qemu/107/agent/network-get-interfaces
+Example URL
+
+This gets the "qemu-guest-agent" stuff, so we can get the IPs that we need to look for here.
+The issue with this is going to be which interface. Fortunately, network MACs are available.
+We can use the MAC from the config and against this endpoint to find which IP we need to be
+using to access the server.
