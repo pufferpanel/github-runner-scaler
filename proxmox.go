@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -28,6 +29,8 @@ var ProxmoxNode = env.Get("proxmox.node")
 var ProxmoxSftpHost = env.Get("proxmox.sftp.host")
 var ProxmoxSftpUser = env.Get("proxmox.sftp.user")
 var ProxmoxSftpPassword = env.Get("proxmox.sftp.password")
+var CloudInitUser = env.Get("cloudinit.ssh.user")
+var CloudInitKey ssh.Signer
 
 var CloneVmUrl *url.URL
 var GetVmsUrl *url.URL
@@ -42,6 +45,12 @@ func init() {
 	}
 
 	GetVmsUrl, err = url.Parse(fmt.Sprintf("%s/api2/json/nodes/%s/qemu", ProxmoxUrl, ProxmoxNode))
+	if err != nil {
+		panic(err)
+	}
+
+	key := env.Get("cloudinit.ssh.key")
+	CloudInitKey, err = ssh.ParsePrivateKey([]byte(key))
 	if err != nil {
 		panic(err)
 	}
@@ -108,7 +117,12 @@ func cloneVM(githubRunId string) error {
 	//start the VM
 	err = startVM(currentId)
 
-	go observeVM(currentId)
+	go func() {
+		err := startGithubRunner(currentId)
+		if err != nil {
+			proxmoxLogger.Printf("Error observing vm: %s", err)
+		}
+	}()
 
 	return err
 }
@@ -224,7 +238,7 @@ func closeResponse(response *http.Response) {
 	}
 }
 
-func doRequest[T ProxmoxResponse](method string, url *url.URL, body []byte) (T, error) {
+func doRequest[T interface{}](method string, url *url.URL, body []byte) (T, error) {
 	request := &http.Request{
 		Method: method,
 		URL:    url,
@@ -271,12 +285,175 @@ func doRequest[T ProxmoxResponse](method string, url *url.URL, body []byte) (T, 
 	return res.Data, err
 }
 
-func observeVM(id int) {
-	//
+func startGithubRunner(id int) error {
+	//first, get the IP of this VM
+	var ip string
+	var err error
+
+	timeout := time.Now().Add(5 * time.Minute)
+	for time.Now().Before(timeout) {
+		ip, err = getVmIP(id)
+		if err != nil {
+			proxmoxLogger.Printf("Error determining VM IP: %s", err.Error())
+			time.Sleep(time.Second * 10)
+			continue
+		}
+		if ip == "" {
+			proxmoxLogger.Printf("IP not found, re-trying")
+			time.Sleep(time.Second * 10)
+			continue
+		}
+	}
+	if ip == "" {
+		return errors.New("failed to determine IP for VM")
+	}
+
+	//we got the ip, let's see how this goes!
+	var client *ssh.Client
+	timeout = time.Now().Add(5 * time.Minute)
+	for time.Now().Before(timeout) {
+		client, err = ssh.Dial("tcp", ip+":22", &ssh.ClientConfig{
+			User: CloudInitUser,
+			Auth: []ssh.AuthMethod{
+				ssh.PublicKeys(),
+			},
+			HostKeyCallback: func(hostname string, remote net.Addr, key ssh.PublicKey) error {
+				return nil
+			},
+		})
+		if err != nil {
+			proxmoxLogger.Printf("Error waiting for SSH: %s", err.Error())
+			time.Sleep(time.Second * 10)
+			continue
+		}
+	}
+	if client == nil {
+		return errors.New("failed to connect to SSH due to timeout")
+	}
+
+	defer client.Close()
+
+	logger := log.New(os.Stdout, fmt.Sprintf("[VM-%d] ", id), log.LstdFlags|log.Lmicroseconds)
+
+	if err = executeCommand(client, "tar -xzvf /opt/runner-cache/actions-runner-*.tar.gz -C .", logger); err != nil {
+		return err
+	}
+
+	config, err := GetJITConfig()
+	if err != nil {
+		return err
+	}
+
+	if err = uploadData(client, "config.json", strings.NewReader(config)); err != nil {
+		return err
+	}
+
+	if err = executeCommand(client, "./run.sh --jitconfig=config.json", logger); err != nil {
+		return err
+	}
+
+	return nil
 }
 
-type ProxmoxResponse interface {
-	None | TaskStatus | string | VM | []VM
+func uploadData(client *ssh.Client, target string, data io.Reader) error {
+	sftpClient, err := sftp.NewClient(client)
+	if err != nil {
+		return err
+	}
+	defer sftpClient.Close()
+
+	targetFile, err := sftpClient.Create(target)
+	if err != nil {
+		return err
+	}
+	defer targetFile.Close()
+
+	_, err = io.Copy(targetFile, data)
+	return err
+}
+
+func uploadFile(client *ssh.Client, source string, target string) error {
+	sourceFile, err := os.Open(source)
+	if err != nil {
+		return err
+	}
+	defer sourceFile.Close()
+
+	return uploadData(client, target, sourceFile)
+}
+
+func executeCommand(client *ssh.Client, command string, logger *log.Logger) error {
+	session, err := client.NewSession()
+	if err != nil {
+		return err
+	}
+	defer session.Close()
+
+	go func() {
+		pipe, err := session.StderrPipe()
+		if err != nil {
+
+		}
+		buf := make([]byte, 1024)
+		var n int
+		for err == nil {
+			n, err = pipe.Read(buf)
+			if n != 0 {
+				logger.Print(string(buf[:n]))
+			}
+		}
+	}()
+	go func() {
+		pipe, err := session.StdoutPipe()
+		if err != nil {
+
+		}
+		buf := make([]byte, 1024)
+		var n int
+		for err == nil {
+			n, err = pipe.Read(buf)
+			if n != 0 {
+				logger.Print(string(buf[:n]))
+			}
+		}
+	}()
+
+	return session.Run(command)
+}
+
+func getVmIP(id int) (string, error) {
+	//first, get the configured network interface we need
+	u, err := url.Parse(fmt.Sprintf("%s/api2/json/nodes/%s/qemu/%d/config", ProxmoxUrl, ProxmoxNode, id))
+	if err != nil {
+		return "", err
+	}
+	config, err := doRequest[VMConfig](http.MethodGet, u, nil)
+	if err != nil {
+		return "", err
+	}
+	netIf := strings.TrimPrefix(strings.Split(config.Net, ",")[0], "virtio=")
+
+	u, err = url.Parse(fmt.Sprintf("%s/api2/json/nodes/%s/qemu/%d/agent/network-get-interfaces", ProxmoxUrl, ProxmoxNode, id))
+	if err != nil {
+		return "", err
+	}
+	agent, err := doRequest[QemuGuestAgentResult](http.MethodGet, u, nil)
+	if err != nil {
+		return "", err
+	}
+
+	for _, v := range agent.Result {
+		if v.HardwareAddress == netIf {
+			//this is the right network
+			for _, z := range v.IPAddresses {
+				//make sure this isn't a loopback
+				if !net.ParseIP(z.IP).IsLoopback() {
+					return z.IP, nil
+				}
+			}
+		}
+	}
+	return "", nil
 }
 
 type None interface{}
@@ -297,4 +474,23 @@ type VM struct {
 	CloudInitCustom string `json:"cicustom,omitempty"`
 	CloudInitUser   string `json:"ciuser,omitempty"`
 	SshKeys         string `json:"sshkeys,omitempty"`
+}
+
+type VMConfig struct {
+	Net string `json:"net0"`
+}
+
+type QemuGuestNetwork struct {
+	Name            string        `json:"name"`
+	IPAddresses     []QemuGuestIP `json:"ip-addresses"`
+	HardwareAddress string        `json:"hardware-address"`
+}
+
+type QemuGuestIP struct {
+	Type string `json:"ip-address-type"`
+	IP   string `json:"ip-address"`
+}
+
+type QemuGuestAgentResult struct {
+	Result []QemuGuestNetwork `json:"result"`
 }

@@ -155,3 +155,12 @@ This gets the "qemu-guest-agent" stuff, so we can get the IPs that we need to lo
 The issue with this is going to be which interface. Fortunately, network MACs are available.
 We can use the MAC from the config and against this endpoint to find which IP we need to be
 using to access the server.
+
+So, after some thought, we're going to actually change this up. The template that we will run
+with packer will copy our SSH key in directly and create the user. This way, all we need to
+do is copy over the config, extra, then run the binary.
+
+Caveat, this requires the builder to now have the key, but that's not much of an issue.
+
+We will also disable the cloudflare tunnel for now. We don't need it for purposes of testing
+until we actually need GitHub to give us enough data.

@@ -15,6 +15,7 @@ services:
       - path: ./.env
       - path: ./override.env
         required: false
+
   tunnel:
     image: cloudflare/cloudflared
     command:
@@ -22,6 +23,7 @@ services:
       - "tunnel"
       - "--url"
       - "http://web:8080"
+    scale: 0
 
 volumes:
   redis-data:
