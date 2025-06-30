@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"errors"
@@ -117,12 +118,14 @@ func cloneVM(githubRunId string) error {
 	//start the VM
 	err = startVM(currentId)
 
-	go func() {
-		err := startGithubRunner(currentId)
+	go func(id int) {
+		defer deleteVM(id)
+
+		err := startGithubRunner(id)
 		if err != nil {
 			proxmoxLogger.Printf("Error observing vm: %s", err)
 		}
-	}()
+	}(currentId)
 
 	return err
 }
@@ -291,7 +294,7 @@ func startGithubRunner(id int) error {
 	var err error
 
 	timeout := time.Now().Add(5 * time.Minute)
-	for time.Now().Before(timeout) {
+	for ip == "" && time.Now().Before(timeout) {
 		ip, err = getVmIP(id)
 		if err != nil {
 			proxmoxLogger.Printf("Error determining VM IP: %s", err.Error())
@@ -311,11 +314,11 @@ func startGithubRunner(id int) error {
 	//we got the ip, let's see how this goes!
 	var client *ssh.Client
 	timeout = time.Now().Add(5 * time.Minute)
-	for time.Now().Before(timeout) {
+	for client == nil && time.Now().Before(timeout) {
 		client, err = ssh.Dial("tcp", ip+":22", &ssh.ClientConfig{
 			User: CloudInitUser,
 			Auth: []ssh.AuthMethod{
-				ssh.PublicKeys(),
+				ssh.PublicKeys(CloudInitKey),
 			},
 			HostKeyCallback: func(hostname string, remote net.Addr, key ssh.PublicKey) error {
 				return nil
@@ -333,22 +336,21 @@ func startGithubRunner(id int) error {
 
 	defer client.Close()
 
-	logger := log.New(os.Stdout, fmt.Sprintf("[VM-%d] ", id), log.LstdFlags|log.Lmicroseconds)
+	logger := log.New(os.Stdout, fmt.Sprintf("[VM-%d] ", id), 0)
 
-	if err = executeCommand(client, "tar -xzvf /opt/runner-cache/actions-runner-*.tar.gz -C .", logger); err != nil {
+	logger.Println("Extracting runner")
+	if err = executeCommand(client, "tar -xzf /opt/runner-cache/actions-runner-*.tar.gz -C .", logger); err != nil {
 		return err
 	}
 
-	config, err := GetJITConfig()
+	logger.Println("Getting runner config")
+	config, err := GetJITConfig(id)
 	if err != nil {
 		return err
 	}
 
-	if err = uploadData(client, "config.json", strings.NewReader(config)); err != nil {
-		return err
-	}
-
-	if err = executeCommand(client, "./run.sh --jitconfig=config.json", logger); err != nil {
+	logger.Println("Starting runner")
+	if err = executeCommand(client, "./run.sh --jitconfig "+config, logger); err != nil {
 		return err
 	}
 
@@ -392,29 +394,23 @@ func executeCommand(client *ssh.Client, command string, logger *log.Logger) erro
 	go func() {
 		pipe, err := session.StderrPipe()
 		if err != nil {
-
+			logger.Printf("Failed to create stdout pipe: %s", err.Error())
+			return
 		}
-		buf := make([]byte, 1024)
-		var n int
-		for err == nil {
-			n, err = pipe.Read(buf)
-			if n != 0 {
-				logger.Print(string(buf[:n]))
-			}
+		reader := bufio.NewScanner(pipe)
+		for reader.Scan() {
+			logger.Print(reader.Text())
 		}
 	}()
 	go func() {
 		pipe, err := session.StdoutPipe()
 		if err != nil {
-
+			logger.Printf("Failed to create stdout pipe: %s", err.Error())
+			return
 		}
-		buf := make([]byte, 1024)
-		var n int
-		for err == nil {
-			n, err = pipe.Read(buf)
-			if n != 0 {
-				logger.Print(string(buf[:n]))
-			}
+		reader := bufio.NewScanner(pipe)
+		for reader.Scan() {
+			logger.Print(reader.Text())
 		}
 	}()
 
@@ -431,7 +427,7 @@ func getVmIP(id int) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	netIf := strings.TrimPrefix(strings.Split(config.Net, ",")[0], "virtio=")
+	netIf := strings.ToLower(strings.TrimPrefix(strings.Split(config.Net, ",")[0], "virtio="))
 
 	u, err = url.Parse(fmt.Sprintf("%s/api2/json/nodes/%s/qemu/%d/agent/network-get-interfaces", ProxmoxUrl, ProxmoxNode, id))
 	if err != nil {
@@ -443,7 +439,7 @@ func getVmIP(id int) (string, error) {
 	}
 
 	for _, v := range agent.Result {
-		if v.HardwareAddress == netIf {
+		if strings.ToLower(v.HardwareAddress) == netIf {
 			//this is the right network
 			for _, z := range v.IPAddresses {
 				//make sure this isn't a loopback
@@ -454,6 +450,36 @@ func getVmIP(id int) (string, error) {
 		}
 	}
 	return "", nil
+}
+
+func deleteVM(id int) {
+	//to delete the VM, we need to stop it and then delete
+	//first, trigger the stop call. At this point, ignore errors.
+	//then get the status of the VM. Wait either we'll get a success or we get an error
+	//after that, nuke it. we can't do much else
+	u, err := url.Parse(fmt.Sprintf("%s/api2/json/nodes/%s/qemu/%d/status/stop", ProxmoxUrl, ProxmoxNode, id))
+	if err != nil {
+		proxmoxLogger.Printf("Failed to delete VM: %s", err.Error())
+		return
+	}
+	_, err = doRequest[None](http.MethodPost, u, nil)
+
+	timeout := time.Now().Add(time.Minute)
+	var status VMStatus
+	u, err = url.Parse(fmt.Sprintf("%s/api2/json/nodes/%s/qemu/%d/status/current", ProxmoxUrl, ProxmoxNode, id))
+	for err == nil && status.Status != "stopped" && time.Now().Before(timeout) {
+		status, err = doRequest[VMStatus](http.MethodGet, u, nil)
+	}
+	if err != nil {
+		proxmoxLogger.Printf("Failed to query VM status: %s", err.Error())
+	}
+
+	//now... nuke it
+	u, err = url.Parse(fmt.Sprintf("%s/api2/json/nodes/%s/qemu/%d", ProxmoxUrl, ProxmoxNode, id))
+	_, err = doRequest[None](http.MethodDelete, u, nil)
+	if err != nil {
+		proxmoxLogger.Printf("Failed to delete VM: %s", err.Error())
+	}
 }
 
 type None interface{}
@@ -493,4 +519,8 @@ type QemuGuestIP struct {
 
 type QemuGuestAgentResult struct {
 	Result []QemuGuestNetwork `json:"result"`
+}
+
+type VMStatus struct {
+	Status string `json:"status"`
 }

@@ -164,3 +164,40 @@ Caveat, this requires the builder to now have the key, but that's not much of an
 
 We will also disable the cloudflare tunnel for now. We don't need it for purposes of testing
 until we actually need GitHub to give us enough data.
+
+## Getting VMs working (2025-06-29)
+
+After a few days of looking at the VMs, I've rebuilt the packer file to better align with using
+the variables and configs. Not sure if this solves anything, but it made the VMs at least boot
+correctly. I still needed to enable cloud-init so our interface would resolve an IP, but so far
+the API calls to get the networking information work. We just needed to ensure the SSH key
+authentication actually works as we wanted.
+
+It turned out the SSH key that was being deployed wasn't what was configured. But, the SSH client
+once told the correct key does get in, and can run commands. The logger wasn't best because of
+batches including line-breaks, so we had to change to the regular Scanner to see if that makes 
+better results.
+
+The next step to solve is deleting the VM. Right now we're doing this manually, so it's a bit
+annoying to do. We're just going to make this a defer action on creation, because we already
+are using SSH to trigger the agent anyway. The idea was we didn't need to directly exist the
+entire time, but that can be a future solution.
+
+To delete, we're going to stop it, wait for it to stop (hopefully, this is a plug pull, so it
+should be under a minute), then send a delete op. If stuff errors, we'll pretend it worked and
+just move on. There's not much recovery at this stage.
+
+Now the next trick is getting the GitHub config right. The caveat is the deleter actually ran
+before the error was logged. That had to be moved around, but now it's going to log in the right
+order.
+
+https://docs.github.com/en/actions/how-tos/security-for-github-actions/security-guides/security-hardening-for-github-actions#using-just-in-time-runners
+
+Finding this documentation about how to use the JIT config is annoying. It wasn't obvious, and
+I ended up eventually finding it through a blog post. That's not ideal. Also, names are unique,
+so if the runner config is generated, but we have issues starting it, the runner needs to be
+removed from the organization. And this now works.
+
+We have a working scaling system. In theory. This does run the jobs, and self-deletes after it
+is done. The caveat is this isn't specific about which job it wants to use, so the ids don't
+quite make sense.
