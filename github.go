@@ -27,11 +27,7 @@ func GetJITConfig(id int) (string, error) {
 		Labels:        []string{githubLabel},
 		RunnerGroupID: groupId,
 	})
-	defer func() {
-		if response != nil && response.Body != nil {
-			_ = response.Body.Close()
-		}
-	}()
+	defer CloseGithubResponse(response)
 	if err != nil {
 		return "", err
 	}
@@ -41,11 +37,7 @@ func GetJITConfig(id int) (string, error) {
 
 func GetRunnerGroupId() (int64, error) {
 	groups, response, err := githubClient.Actions.ListOrganizationRunnerGroups(context.Background(), githubOrganization, &github.ListOrgRunnerGroupOptions{})
-	defer func() {
-		if response != nil && response.Body != nil {
-			_ = response.Body.Close()
-		}
-	}()
+	defer CloseGithubResponse(response)
 	if err != nil {
 		return 0, err
 	}
@@ -56,4 +48,11 @@ func GetRunnerGroupId() (int64, error) {
 	}
 
 	return 0, errors.New("runner group not found")
+}
+
+// CloseGithubResponse GitHub's wrapper means we can't use our own one...
+func CloseGithubResponse(response *github.Response) {
+	if response != nil {
+		CloseResponse(response.Response)
+	}
 }

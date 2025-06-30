@@ -15,6 +15,10 @@ services:
       - path: ./.env
       - path: ./override.env
         required: false
+    environment:
+      - LOG_DIR=/runner-logs
+    volumes:
+      - logs:/runner-logs
 
   tunnel:
     image: cloudflare/cloudflared
@@ -27,3 +31,4 @@ services:
 
 volumes:
   redis-data:
+  logs:

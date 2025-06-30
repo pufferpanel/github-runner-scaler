@@ -201,3 +201,22 @@ removed from the organization. And this now works.
 We have a working scaling system. In theory. This does run the jobs, and self-deletes after it
 is done. The caveat is this isn't specific about which job it wants to use, so the ids don't
 quite make sense.
+
+## Changing ids
+
+So, after the above was completed, what we've learned is that even though we do get the workflow
+id, that's not actually what might run on our instance. So, any "tracking" that we are doing
+doesn't really offer the value that we hoped for. So, we might just change this to use a GUID
+so we just spin up a few and let them go. We could track the number of jobs queued up. Which,
+this does work, but if we get out of sync, the VMs won't be correct. 
+
+There might be an alterative, but it requires research. We could change that to a polling system,
+where we simply poll GitHub and see if there are jobs queued. This isn't great, but it would mean
+if we get out of sync, we're not completely stuck. If we assume we keep the redis data in sync,
+then we don't need this. But, time will tell. This isn't exactly a perfect science. ARC is a
+giant thing, so I can see why this isn't fun to solve.
+
+The logging has been updated to store the full job log (only the actual SSH connection) to a file
+with the run id. This means we can get the log of the job at least. Hooking this up to save the
+entire log for the process is going to be next.
+

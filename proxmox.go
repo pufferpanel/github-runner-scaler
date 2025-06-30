@@ -33,6 +33,8 @@ var ProxmoxSftpPassword = env.Get("proxmox.sftp.password")
 var CloudInitUser = env.Get("cloudinit.ssh.user")
 var CloudInitKey ssh.Signer
 
+var logDir = env.Get("log.dir")
+
 var CloneVmUrl *url.URL
 var GetVmsUrl *url.URL
 
@@ -118,14 +120,14 @@ func cloneVM(githubRunId string) error {
 	//start the VM
 	err = startVM(currentId)
 
-	go func(id int) {
+	go func(id int, runId string) {
 		defer deleteVM(id)
 
-		err := startGithubRunner(id)
+		err := startGithubRunner(id, githubRunId)
 		if err != nil {
 			proxmoxLogger.Printf("Error observing vm: %s", err)
 		}
-	}(currentId)
+	}(currentId, githubRunId)
 
 	return err
 }
@@ -235,12 +237,6 @@ func writeMetaCloudInit(filename string, data map[string]string) error {
 	return err
 }
 
-func closeResponse(response *http.Response) {
-	if response != nil && response.Body != nil {
-		_ = response.Body.Close()
-	}
-}
-
 func doRequest[T interface{}](method string, url *url.URL, body []byte) (T, error) {
 	request := &http.Request{
 		Method: method,
@@ -261,7 +257,7 @@ func doRequest[T interface{}](method string, url *url.URL, body []byte) (T, erro
 	request.Header.Set("Authorization", fmt.Sprintf("PVEAPIToken=%s=%s", env.Get("proxmox.user"), env.Get("proxmox.password")))
 
 	response, err := httpClient.Do(request)
-	defer closeResponse(response)
+	defer CloseResponse(response)
 	if err != nil || response.StatusCode >= 400 {
 		var data []byte
 		if err != nil {
@@ -288,14 +284,14 @@ func doRequest[T interface{}](method string, url *url.URL, body []byte) (T, erro
 	return res.Data, err
 }
 
-func startGithubRunner(id int) error {
+func startGithubRunner(vmid int, githubRunId string) error {
 	//first, get the IP of this VM
 	var ip string
 	var err error
 
 	timeout := time.Now().Add(5 * time.Minute)
 	for ip == "" && time.Now().Before(timeout) {
-		ip, err = getVmIP(id)
+		ip, err = getVmIP(vmid)
 		if err != nil {
 			proxmoxLogger.Printf("Error determining VM IP: %s", err.Error())
 			time.Sleep(time.Second * 10)
@@ -333,10 +329,15 @@ func startGithubRunner(id int) error {
 	if client == nil {
 		return errors.New("failed to connect to SSH due to timeout")
 	}
+	defer Close(client)
 
-	defer client.Close()
-
-	logger := log.New(os.Stdout, fmt.Sprintf("[VM-%d] ", id), 0)
+	logFile, err := os.Create(filepath.Join(logDir, fmt.Sprintf("%s.log", githubRunId)))
+	if err != nil {
+		return err
+	}
+	defer Close(logFile)
+	logger := log.New(io.MultiWriter(os.Stdout, logFile), fmt.Sprintf("[VM-%d] ", vmid), 0)
+	logger.Printf("Run Id: %s", githubRunId)
 
 	logger.Println("Extracting runner")
 	if err = executeCommand(client, "tar -xzf /opt/runner-cache/actions-runner-*.tar.gz -C .", logger); err != nil {
@@ -344,7 +345,7 @@ func startGithubRunner(id int) error {
 	}
 
 	logger.Println("Getting runner config")
-	config, err := GetJITConfig(id)
+	config, err := GetJITConfig(vmid)
 	if err != nil {
 		return err
 	}
@@ -362,13 +363,13 @@ func uploadData(client *ssh.Client, target string, data io.Reader) error {
 	if err != nil {
 		return err
 	}
-	defer sftpClient.Close()
+	defer Close(sftpClient)
 
 	targetFile, err := sftpClient.Create(target)
 	if err != nil {
 		return err
 	}
-	defer targetFile.Close()
+	defer Close(targetFile)
 
 	_, err = io.Copy(targetFile, data)
 	return err
@@ -379,7 +380,7 @@ func uploadFile(client *ssh.Client, source string, target string) error {
 	if err != nil {
 		return err
 	}
-	defer sourceFile.Close()
+	defer Close(sourceFile)
 
 	return uploadData(client, target, sourceFile)
 }
@@ -389,7 +390,7 @@ func executeCommand(client *ssh.Client, command string, logger *log.Logger) erro
 	if err != nil {
 		return err
 	}
-	defer session.Close()
+	defer Close(session)
 
 	go func() {
 		pipe, err := session.StderrPipe()
